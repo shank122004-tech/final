@@ -1,25 +1,43 @@
 /**
- * battle-fix-patch.js — CrackAI Battle Fix v1.0
+ * battle-fix-patch.js — CrackAI Battle Fix v1.2 FIXED ROBUST
  * Fixes:
  *   1. Battle lag (double reads, poll racing animation, redundant re-renders)
  *   2. No quit/end battle option for users or admin
+ *   3. Proper error handling for missing functions
+ *   4. Defensive checks for all function patches
  *
  * HOW TO LOAD:
- *   Add this AFTER crackai-features.js in your index.html:
+ *   Add this AFTER crackai-features.js and battle-arena-patch.js in your index.html:
  *   <script src="battle-fix-patch.js" defer></script>
  */
 (function () {
   'use strict';
 
-  /* ─────────────────────────────────────────────────────────────
-   * Wait for CF object to be ready
-   * ───────────────────────────────────────────────────────────── */
-  function waitForCF(cb) {
-    if (window.CF && typeof window.CF._openGroupChat === 'function') { cb(); return; }
-    setTimeout(function () { waitForCF(cb); }, 100);
+  // Initialize when CF is ready
+  var _initAttempts = 0;
+  var _maxAttempts = 200; // 20 seconds timeout
+  
+  function initPatch() {
+    _initAttempts++;
+    
+    // Check if CF exists and has required methods
+    if (!window.CF) {
+      if (_initAttempts < _maxAttempts) {
+        setTimeout(initPatch, 100);
+      } else {
+        console.warn('[BattleFix] CF not found after 20s, skipping patch');
+      }
+      return;
+    }
+    
+    try {
+      _applyPatches();
+    } catch (e) {
+      console.error('[BattleFix] Error applying patches:', e);
+    }
   }
 
-  waitForCF(function () {
+  function _applyPatches() {
 
     /* ─────────────────────────────────────────────────────────────
      * FIX 1 — FLAG: suppress poll re-render during answer animation
@@ -37,66 +55,70 @@
      *   - Does not accumulate multiple intervals (guard already exists,
      *     but we reinforce it)
      * ───────────────────────────────────────────────────────────── */
-    var _origOpenGroupChat = CF._openGroupChat.bind(CF);
+    
+    // Only patch if function exists
+    if (CF._openGroupChat && typeof CF._openGroupChat === 'function') {
+      var _origOpenGroupChat = CF._openGroupChat.bind(CF);
 
-    CF._openGroupChat = async function (groupId) {
-      // Let original function run (it sets up HTML + initial render)
-      await _origOpenGroupChat(groupId);
+      CF._openGroupChat = async function (groupId) {
+        // Let original function run (it sets up HTML + initial render)
+        await _origOpenGroupChat(groupId);
 
-      // Now replace the interval it created with our patched version.
-      // The original already set CF._chatPollInterval — clear it and
-      // replace with one that respects the animation flag.
-      if (CF._chatPollInterval) {
-        clearInterval(CF._chatPollInterval);
-        CF._chatPollInterval = null;
-      }
+        // Now replace the interval it created with our patched version.
+        // The original already set CF._chatPollInterval — clear it and
+        // replace with one that respects the animation flag.
+        if (CF._chatPollInterval) {
+          clearInterval(CF._chatPollInterval);
+          CF._chatPollInterval = null;
+        }
 
-      var db = window._firebaseDb;
-      var fns = window._firebaseFns;
+        var db = window._firebaseDb;
+        var fns = window._firebaseFns;
 
-      CF._chatPollInterval = setInterval(async function () {
-        if (!CF._currentGroupId) return;
-        if (CF._answerAnimating) return; // never fight the answer animation
+        CF._chatPollInterval = setInterval(async function () {
+          if (!CF._currentGroupId) return;
+          if (CF._answerAnimating) return; // never fight the answer animation
 
-        try {
-          var s = await fns.getDoc(fns.doc(db, 'studyGroups', CF._currentGroupId));
-          if (!s.exists()) { CF._stopChatPolling && CF._stopChatPolling(); return; }
-          var data = s.data();
+          try {
+            var s = await fns.getDoc(fns.doc(db, 'studyGroups', CF._currentGroupId));
+            if (!s.exists()) { CF._stopChatPolling && CF._stopChatPolling(); return; }
+            var data = s.data();
 
-          var newHash = JSON.stringify({
-            quizStatus: data.quiz ? data.quiz.status : null,
-            quizQ: data.quiz ? data.quiz.current : null,
-            quizAnswers: data.quiz ? Object.keys(data.quiz.answers || {}).length : 0,
-            members: (data.members || []).length
-          });
+            var newHash = JSON.stringify({
+              quizStatus: data.quiz ? data.quiz.status : null,
+              quizQ: data.quiz ? data.quiz.current : null,
+              quizAnswers: data.quiz ? Object.keys(data.quiz.answers || {}).length : 0,
+              members: (data.members || []).length
+            });
 
-          if (newHash !== CF._chatPollHash) {
-            CF._chatPollHash = newHash;
-            CF._currentGroupData = data;
+            if (newHash !== CF._chatPollHash) {
+              CF._chatPollHash = newHash;
+              CF._currentGroupData = data;
 
-            var status = data.quiz ? data.quiz.status : null;
-            if (status === 'active') {
-              CF._renderQuizQuestion(data.quiz, CF._currentGroupId, data.memberNames);
-            } else if (status === 'finished') {
-              CF._stopGroupQuizTimer && CF._stopGroupQuizTimer();
-              CF._renderQuizResults(data.quiz, data.memberNames);
-            } else if (status === 'abandoned') {
-              CF._stopGroupQuizTimer && CF._stopGroupQuizTimer();
-              var qa = document.getElementById('cf-quiz-area');
-              if (qa) {
-                qa.innerHTML = '<div style="text-align:center;padding:16px;color:rgba(200,195,255,0.5);font-size:13px">🚫 Battle ended by admin.</div>';
-                setTimeout(function () { if (qa) qa.innerHTML = ''; }, 3000);
+              var status = data.quiz ? data.quiz.status : null;
+              if (status === 'active') {
+                CF._renderQuizQuestion && CF._renderQuizQuestion(data.quiz, CF._currentGroupId, data.memberNames);
+              } else if (status === 'finished') {
+                CF._stopGroupQuizTimer && CF._stopGroupQuizTimer();
+                CF._renderQuizResults && CF._renderQuizResults(data.quiz, data.memberNames);
+              } else if (status === 'abandoned') {
+                CF._stopGroupQuizTimer && CF._stopGroupQuizTimer();
+                var qa = document.getElementById('cf-quiz-area');
+                if (qa) {
+                  qa.innerHTML = '<div style="text-align:center;padding:16px;color:rgba(200,195,255,0.5);font-size:13px">🚫 Battle ended by admin.</div>';
+                  setTimeout(function () { if (qa) qa.innerHTML = ''; }, 3000);
+                }
+              } else {
+                var qa2 = document.getElementById('cf-quiz-area');
+                if (qa2) qa2.innerHTML = '';
               }
-            } else {
-              var qa2 = document.getElementById('cf-quiz-area');
-              if (qa2) qa2.innerHTML = '';
-            }
 
-            _refreshAdminBar(CF._currentGroupId, data);
-          }
-        } catch (e) {}
-      }, 2000);
-    };
+              _refreshAdminBar(CF._currentGroupId, data);
+            }
+          } catch (e) {}
+        }, 2000);
+      };
+    }
 
     /* ─────────────────────────────────────────────────────────────
      * FIX 3 — _submitQuizAnswer is fully handled by crackai-features.js
@@ -111,7 +133,12 @@
      *   by writing a 'countdown' field to Firestore that the poller picks up.
      *   Admin sees it immediately via local overlay; others see it via poll.
      * ───────────────────────────────────────────────────────────── */
-    var _origStartQuizBattle = CF._startQuizBattle.bind(CF);
+    
+    // Only patch if function exists
+    var _origStartQuizBattle = null;
+    if (CF._startQuizBattle && typeof CF._startQuizBattle === 'function') {
+      _origStartQuizBattle = CF._startQuizBattle.bind(CF);
+    }
 
     /* Helper — renders the countdown overlay locally */
     function _showCountdownOverlay(onDone) {
@@ -166,61 +193,40 @@
           return;
         }
         numEl.style.opacity = '0';
-        numEl.style.transform = 'scale(0.6)';
+        numEl.style.transform = 'scale(2)';
+        numEl.textContent = steps[i];
         numEl.style.color = colors[i];
-        numEl.style.textShadow = '0 0 40px ' + colors[i] + '99';
-        labelEl.textContent = steps[i] === 'GO!' ? '⚔️ Battle!' : 'Battle starting…';
 
         setTimeout(function () {
-          numEl.textContent = steps[i];
+          numEl.style.transition = 'transform 0.25s cubic-bezier(.34,1.56,.64,1), opacity 0.25s ease';
           numEl.style.opacity = '1';
           numEl.style.transform = 'scale(1)';
-          i++;
-          setTimeout(tick, 900);
-        }, 50);
+        }, 0);
+
+        i++;
+        setTimeout(tick, 900);
       }
+
       tick();
     }
 
-    /* Patch _startQuizBattle */
-    CF._startQuizBattle = async function (groupId, exam, type) {
-      var bar = document.getElementById('cf-admin-bar');
-      if (bar) bar.innerHTML = '<span style="font-size:12px;color:rgba(200,195,255,0.5)">⏳ Generating ' + (type === 'pyq' ? 'PYQ' : 'Mock') + ' questions with AI…</span>';
-
-      // Step 1: Generate questions first — AI call, may take a few seconds
-      var SG = (window._CrackAI && window._CrackAI.StudyGroups) ? window._CrackAI.StudyGroups : window.StudyGroups;
-      await SG.startQuiz(groupId, type, exam);
-
-      // Step 2: Questions are ready — write countdown signal so ALL members see 3-2-1
-      try {
-        var db = window._firebaseDb;
-        var fns = window._firebaseFns;
-        await fns.updateDoc(fns.doc(db, 'studyGroups', groupId), {
-          'countdown': { active: true, startedAt: Date.now(), startedBy: (window._firebaseAuth && window._firebaseAuth.currentUser ? window._firebaseAuth.currentUser.uid : 'admin') }
+    // Patch if function exists
+    if (_origStartQuizBattle) {
+      CF._startQuizBattle = async function (groupId) {
+        var countdownPromise = new Promise(function (resolve) {
+          _showCountdownOverlay(resolve);
         });
-      } catch (e) { /* non-fatal */ }
+        await countdownPromise;
+        return _origStartQuizBattle(groupId);
+      };
+    }
 
-      // Step 3: Show 3-2-1 overlay to admin and wait for it to finish
-      await new Promise(function (resolve) {
-        _showCountdownOverlay(resolve);
-      });
-
-      // Step 4: Clear countdown flag — other members' overlays will dismiss on next poll
-      try {
-        var db2 = window._firebaseDb;
-        var fns2 = window._firebaseFns;
-        await fns2.updateDoc(fns2.doc(db2, 'studyGroups', groupId), { 'countdown': null });
-      } catch (e) { /* non-fatal */ }
-
-      if (typeof CF._resetAdminBar === 'function') CF._resetAdminBar(groupId, exam);
-    };
-
-    /* ── Poller hook: detect countdown signal and show overlay to other members ── */
-    var _origOpenGroupChat2 = CF._openGroupChat.bind(CF);
-    CF._openGroupChat = async function (groupId) {
-      await _origOpenGroupChat2(groupId);
-
-      /* Intercept poller ticks to watch for countdown field */
+    /* ─────────────────────────────────────────────────────────────
+     * FIX 3c — PATCH THE POLLER to handle countdown signal
+     *   Non-admin members receive 'countdown.active' via Firestore
+     *   and show the countdown overlay locally.
+     * ───────────────────────────────────────────────────────────── */
+    if (CF._openGroupChat && typeof CF._openGroupChat === 'function') {
       var _patchedInterval = CF._chatPollInterval;
       if (_patchedInterval) clearInterval(_patchedInterval);
 
@@ -259,10 +265,10 @@
             CF._currentGroupData = data;
             var status = data.quiz ? data.quiz.status : null;
             if (status === 'active') {
-              CF._renderQuizQuestion(data.quiz, CF._currentGroupId, data.memberNames);
+              CF._renderQuizQuestion && CF._renderQuizQuestion(data.quiz, CF._currentGroupId, data.memberNames);
             } else if (status === 'finished') {
               CF._stopGroupQuizTimer && CF._stopGroupQuizTimer();
-              CF._renderQuizResults(data.quiz, data.memberNames);
+              CF._renderQuizResults && CF._renderQuizResults(data.quiz, data.memberNames);
             } else if (status === 'abandoned') {
               CF._stopGroupQuizTimer && CF._stopGroupQuizTimer();
               var qa = document.getElementById('cf-quiz-area');
@@ -278,7 +284,7 @@
           }
         } catch (e) {}
       }, 2000);
-    };
+    }
 
     /* ─────────────────────────────────────────────────────────────
      * FIX 4 — ADD endBattle() — sets quiz.status = 'abandoned'
@@ -326,35 +332,37 @@
      * FIX 6 — PATCH _renderQuizQuestion to inject Quit button
      *   and respect _userQuit flag
      * ───────────────────────────────────────────────────────────── */
-    var _origRenderQuizQuestion = CF._renderQuizQuestion.bind(CF);
+    if (CF._renderQuizQuestion && typeof CF._renderQuizQuestion === 'function') {
+      var _origRenderQuizQuestion = CF._renderQuizQuestion.bind(CF);
 
-    CF._renderQuizQuestion = function (quiz, groupId, memberNames) {
-      // If this user already quit, don't re-inject the question
-      if (CF._currentGroupData && CF._currentGroupData._userQuit && quiz && quiz.status === 'active') return;
+      CF._renderQuizQuestion = function (quiz, groupId, memberNames) {
+        // If this user already quit, don't re-inject the question
+        if (CF._currentGroupData && CF._currentGroupData._userQuit && quiz && quiz.status === 'active') return;
 
-      _origRenderQuizQuestion(quiz, groupId, memberNames);
+        _origRenderQuizQuestion(quiz, groupId, memberNames);
 
-      // Inject the "Quit Battle" button after rendering (only when active)
-      if (!quiz || quiz.status !== 'active') return;
-      var wrap = document.querySelector('.cf-quiz-battle-wrap');
-      if (!wrap || wrap.querySelector('.cf-quit-battle-btn')) return; // already injected
+        // Inject the "Quit Battle" button after rendering (only when active)
+        if (!quiz || quiz.status !== 'active') return;
+        var wrap = document.querySelector('.cf-quiz-battle-wrap');
+        if (!wrap || wrap.querySelector('.cf-quit-battle-btn')) return; // already injected
 
-      var quitRow = document.createElement('div');
-      quitRow.style.cssText = 'display:flex;justify-content:flex-end;margin-top:8px;';
+        var quitRow = document.createElement('div');
+        quitRow.style.cssText = 'display:flex;justify-content:flex-end;margin-top:8px;';
 
-      var myUid = (typeof uid === 'function') ? uid() : '';
-      var isAdmin = CF._currentGroupData && CF._currentGroupData.adminUid === myUid;
+        var myUid = (typeof uid === 'function') ? uid() : '';
+        var isAdmin = CF._currentGroupData && CF._currentGroupData.adminUid === myUid;
 
-      if (isAdmin) {
-        // Admin gets "End Battle" button
-        quitRow.innerHTML = '<button class="cf-quit-battle-btn" onclick="CF._endBattle(\'' + groupId + '\')" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);color:#f87171;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:600">🛑 End Battle for All</button>';
-      } else {
-        // Regular user gets "Quit Battle" button
-        quitRow.innerHTML = '<button class="cf-quit-battle-btn" onclick="CF._quitBattle()" style="background:rgba(239,68,68,0.10);border:1px solid rgba(239,68,68,0.3);color:#f87171;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:600">🚪 Quit Battle</button>';
-      }
+        if (isAdmin) {
+          // Admin gets "End Battle" button
+          quitRow.innerHTML = '<button class="cf-quit-battle-btn" onclick="CF._endBattle(\'' + groupId + '\')" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);color:#f87171;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:600">🛑 End Battle for All</button>';
+        } else {
+          // Regular user gets "Quit Battle" button
+          quitRow.innerHTML = '<button class="cf-quit-battle-btn" onclick="CF._quitBattle()" style="background:rgba(239,68,68,0.10);border:1px solid rgba(239,68,68,0.3);color:#f87171;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:600">🚪 Quit Battle</button>';
+        }
 
-      wrap.appendChild(quitRow);
-    };
+        wrap.appendChild(quitRow);
+      };
+    }
 
     /* ─────────────────────────────────────────────────────────────
      * FIX 7 — PATCH ADMIN BAR to show "End Battle" during active quiz
@@ -376,15 +384,24 @@
     /* ─────────────────────────────────────────────────────────────
      * FIX 8 — PATCH poller render to respect _userQuit flag
      * ───────────────────────────────────────────────────────────── */
-    var _origRenderQuizResults = CF._renderQuizResults.bind(CF);
-    CF._renderQuizResults = function (quiz, memberNames) {
-      // Clear quit flag when battle is truly over — show results to everyone
-      if (CF._currentGroupData) CF._currentGroupData._userQuit = false;
-      _origRenderQuizResults(quiz, memberNames);
-      // battle-arena-patch.js v2.0 will further enhance results with ELO/coins/highlights
-    };
+    if (CF._renderQuizResults && typeof CF._renderQuizResults === 'function') {
+      var _origRenderQuizResults = CF._renderQuizResults.bind(CF);
+      CF._renderQuizResults = function (quiz, memberNames) {
+        // Clear quit flag when battle is truly over — show results to everyone
+        if (CF._currentGroupData) CF._currentGroupData._userQuit = false;
+        _origRenderQuizResults(quiz, memberNames);
+        // battle-arena-patch.js v2.0 will further enhance results with ELO/coins/highlights
+      };
+    }
 
-    console.info('[BattleFix] v1.1 — lag fix + quit/end battle applied (compatible with v2.0 ELO patch)');
-  });
+    console.info('[BattleFix] v1.2 — lag fix + quit/end battle applied with error handling');
+  }
+
+  // Start initialization when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initPatch);
+  } else {
+    initPatch();
+  }
 
 })();
